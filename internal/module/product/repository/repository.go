@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"murakali/internal/model"
 	"murakali/internal/module/product"
 	"murakali/internal/module/product/delivery/body"
@@ -269,20 +270,18 @@ func (r *productRepo) GetProductDetail(ctx context.Context, productID string, pr
 			return nil, err
 		}
 
-		if promo.PromotionDiscountPercentage != nil {
-			if *detail.NormalPrice >= *promo.PromotionMinProductPrice {
-				discountedPrice := *detail.NormalPrice - (*detail.NormalPrice * (*promo.PromotionDiscountPercentage / float64(100)))
-				if discountedPrice > *promo.PromotionMaxDiscountPrice {
-					discountedPrice = *detail.NormalPrice - *promo.PromotionMaxDiscountPrice
-				}
-				detail.DiscountPrice = &discountedPrice
+		if promo != nil {
+			discountedPrice := 0.0
+			if promo.PromotionDiscountPercentage != nil {
+				discountedPrice = *detail.NormalPrice - *promo.PromotionDiscountFixPrice
+			} else if promo.PromotionDiscountFixPrice != nil {
+				discountedPrice = *detail.NormalPrice - (*detail.NormalPrice * (*promo.PromotionDiscountPercentage / float64(100)))
 			}
-		}
-		if promo.PromotionDiscountFixPrice != nil {
 			if *detail.NormalPrice >= *promo.PromotionMinProductPrice {
-				discountedPrice := *detail.NormalPrice - float64(*promo.PromotionDiscountFixPrice)
-				if float64(*promo.PromotionDiscountFixPrice) > *promo.PromotionMaxDiscountPrice {
+				if *promo.PromotionDiscountFixPrice > *promo.PromotionMaxDiscountPrice {
 					discountedPrice = *detail.NormalPrice - *promo.PromotionMaxDiscountPrice
+				} else if discountedPrice > *promo.PromotionMaxDiscountPrice {
+					discountedPrice = *promo.PromotionMaxDiscountPrice
 				}
 				detail.DiscountPrice = &discountedPrice
 			}
@@ -322,6 +321,211 @@ func (r *productRepo) GetProductDetail(ctx context.Context, productID string, pr
 func (r *productRepo) GetTotalProduct(ctx context.Context) (int64, error) {
 	var total int64
 	if err := r.PSQL.QueryRowContext(ctx, GetTotalProductQuery).Scan(&total); err != nil {
+		return 0, err
+	}
+
+	return total, nil
+}
+
+func (r *productRepo) GetProducts(ctx context.Context, pgn *pagination.Pagination, query *body.GetProductQueryRequest) ([]*body.Products,
+	[]*model.Promotion, []*model.Voucher, error) {
+	products := make([]*body.Products, 0)
+	promotions := make([]*model.Promotion, 0)
+	vouchers := make([]*model.Voucher, 0)
+
+	queryOrderBySomething := fmt.Sprintf(OrderBySomething, pgn.GetSort(), pgn.GetLimit(),
+		pgn.GetOffset())
+	var queryWhereProvinceIds, queryWhereShopIds string
+
+	if query.Shop != "" {
+		queryWhereShopIds = fmt.Sprintf(WhereShopIds, query.Shop)
+	}
+	var res *sql.Rows
+	var err error
+	if len(query.Province) > 0 {
+		res, err = r.PSQL.QueryContext(
+			ctx, GetProductsWithProvinceQuery+queryWhereShopIds+queryWhereProvinceIds+queryOrderBySomething,
+			query.Search,
+			query.Category,
+			query.MinRating,
+			query.MaxRating,
+			query.MinPrice,
+			query.MaxPrice,
+			query.Province,
+		)
+	} else {
+		res, err = r.PSQL.QueryContext(
+			ctx, GetProductsQuery+queryWhereShopIds+queryWhereProvinceIds+queryOrderBySomething,
+			query.Search,
+			query.Category,
+			query.MinRating,
+			query.MaxRating,
+			query.MinPrice,
+			query.MaxPrice,
+		)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		defer res.Close()
+	}
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer res.Close()
+
+	for res.Next() {
+		var productData body.Products
+		var promo model.Promotion
+		var voucher model.Voucher
+
+		if errScan := res.Scan(
+			&productData.Title,
+			&productData.UnitSold,
+			&productData.RatingAVG,
+			&productData.ThumbnailURL,
+			&productData.MinPrice,
+			&productData.MaxPrice,
+			&productData.ViewCount,
+			&promo.DiscountPercentage,
+			&promo.DiscountFixPrice,
+			&promo.MinProductPrice,
+			&promo.MaxDiscountPrice,
+			&voucher.DiscountPercentage,
+			&voucher.DiscountFixPrice,
+			&productData.ShopName,
+			&productData.CategoryName,
+			&productData.ShopProvince,
+		); errScan != nil {
+			return nil, nil, nil, err
+		}
+
+		products = append(products, &productData)
+		promotions = append(promotions, &promo)
+		vouchers = append(vouchers, &voucher)
+	}
+
+	if res.Err() != nil {
+		return nil, nil, nil, err
+	}
+
+	return products, promotions, vouchers, err
+}
+
+func (r *productRepo) GetAllTotalProduct(ctx context.Context, query *body.GetProductQueryRequest) (int64, error) {
+	var total int64
+
+	var queryWhereProvinceIds, queryWhereShopIds string
+
+	if query.Shop != "" {
+		queryWhereShopIds = fmt.Sprintf(WhereShopIds, query.Shop)
+	}
+
+	if len(query.Province) > 0 {
+		if err := r.PSQL.QueryRowContext(ctx,
+			GetAllTotalProductWithProvinceQuery+queryWhereShopIds+queryWhereProvinceIds,
+			query.Search,
+			query.Category,
+			query.MinRating,
+			query.MaxRating,
+			query.MinPrice,
+			query.MaxPrice,
+			query.Province,
+		).Scan(&total); err != nil {
+			return 0, err
+		}
+	} else {
+		if err := r.PSQL.QueryRowContext(ctx,
+			GetAllTotalProductQuery+queryWhereShopIds+queryWhereProvinceIds,
+			query.Search,
+			query.Category,
+			query.MinRating,
+			query.MaxRating,
+			query.MinPrice,
+			query.MaxPrice,
+		).Scan(&total); err != nil {
+			return 0, err
+		}
+	}
+
+	return total, nil
+}
+
+func (r *productRepo) GetFavoriteProducts(
+	ctx context.Context, pgn *pagination.Pagination, query *body.GetProductQueryRequest, userID string) ([]*body.Products,
+	[]*model.Promotion, []*model.Voucher, error) {
+	products := make([]*body.Products, 0)
+	promotions := make([]*model.Promotion, 0)
+	vouchers := make([]*model.Voucher, 0)
+
+	q := fmt.Sprintf(GetFavoriteProductsQuery, pgn.GetSort())
+	res, err := r.PSQL.QueryContext(
+		ctx, q,
+		query.Search,
+		query.Category,
+		query.Shop,
+		query.MinRating,
+		query.MaxRating,
+		query.MinPrice,
+		query.MaxPrice,
+		userID,
+		pgn.GetLimit(),
+		pgn.GetOffset())
+
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer res.Close()
+
+	for res.Next() {
+		var productData body.Products
+		var promo model.Promotion
+		var voucher model.Voucher
+
+		if errScan := res.Scan(
+			&productData.Title,
+			&productData.UnitSold,
+			&productData.RatingAVG,
+			&productData.ThumbnailURL,
+			&productData.MinPrice,
+			&productData.MaxPrice,
+			&productData.ViewCount,
+			&promo.DiscountPercentage,
+			&promo.DiscountFixPrice,
+			&promo.MinProductPrice,
+			&promo.MaxDiscountPrice,
+			&voucher.DiscountPercentage,
+			&voucher.DiscountFixPrice,
+			&productData.ShopName,
+			&productData.CategoryName,
+		); errScan != nil {
+			return nil, nil, nil, err
+		}
+
+		products = append(products, &productData)
+		promotions = append(promotions, &promo)
+		vouchers = append(vouchers, &voucher)
+	}
+
+	if res.Err() != nil {
+		return nil, nil, nil, err
+	}
+
+	return products, promotions, vouchers, err
+}
+
+func (r *productRepo) GetAllFavoriteTotalProduct(ctx context.Context, query *body.GetProductQueryRequest, userID string) (int64, error) {
+	var total int64
+	if err := r.PSQL.QueryRowContext(ctx,
+		GetAllTotalFavoriteProductQuery,
+		query.Search,
+		query.Category,
+		query.Shop,
+		query.MinRating,
+		query.MaxRating,
+		query.MinPrice,
+		query.MaxPrice,
+		userID,
+	).Scan(&total); err != nil {
 		return 0, err
 	}
 

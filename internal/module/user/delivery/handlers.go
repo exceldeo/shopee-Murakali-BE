@@ -38,11 +38,6 @@ func (h *userHandlers) RegisterMerchant(c *gin.Context) {
 		return
 	}
 
-	if !exist {
-		response.ErrorResponse(c.Writer, response.UnauthorizedMessage, http.StatusUnauthorized)
-		return
-	}
-
 	var requestBody body.RegisterMerchant
 	if err := c.ShouldBind(&requestBody); err != nil {
 		response.ErrorResponse(c.Writer, response.BadRequestMessage, http.StatusBadRequest)
@@ -55,6 +50,64 @@ func (h *userHandlers) RegisterMerchant(c *gin.Context) {
 		return
 	}
 	if err := h.userUC.RegisterMerchant(c, userID.(string), requestBody.ShopName); err != nil {
+		var e *httperror.Error
+		if !errors.As(err, &e) {
+			h.logger.Errorf("HandlerUser, Error: %s", err)
+			response.ErrorResponse(c.Writer, response.InternalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+
+		response.ErrorResponse(c.Writer, e.Err.Error(), e.Status)
+		return
+	}
+
+	response.SuccessResponse(c.Writer, nil, http.StatusOK)
+}
+
+func (h *userHandlers) GetWallet(c *gin.Context) {
+	userID, exist := c.Get("userID")
+	if !exist {
+		response.ErrorResponse(c.Writer, response.UnauthorizedMessage, http.StatusUnauthorized)
+		return
+	}
+
+	wallet, err := h.userUC.GetWallet(c, userID.(string))
+	if err != nil {
+		var e *httperror.Error
+		if !errors.As(err, &e) {
+			h.logger.Errorf("HandlerUser, Error: %s", err)
+			response.ErrorResponse(c.Writer, response.InternalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+
+		response.ErrorResponse(c.Writer, e.Err.Error(), e.Status)
+		return
+	}
+
+	wallet.PIN = ""
+	response.SuccessResponse(c.Writer, wallet, http.StatusOK)
+}
+
+func (h *userHandlers) ActivateWallet(c *gin.Context) {
+	userID, exist := c.Get("userID")
+	if !exist {
+		response.ErrorResponse(c.Writer, response.UnauthorizedMessage, http.StatusUnauthorized)
+		return
+	}
+
+	var requestBody body.ActivateWalletRequest
+	if err := c.ShouldBind(&requestBody); err != nil {
+		response.ErrorResponse(c.Writer, response.BadRequestMessage, http.StatusBadRequest)
+		return
+	}
+
+	invalidFields, err := requestBody.Validate()
+	if err != nil {
+		response.ErrorResponseData(c.Writer, invalidFields, response.UnprocessableEntityMessage, http.StatusUnprocessableEntity)
+		return
+	}
+
+	if err := h.userUC.ActivateWallet(c, userID.(string), requestBody.Pin); err != nil {
 		var e *httperror.Error
 		if !errors.As(err, &e) {
 			h.logger.Errorf("HandlerUser, Error: %s", err)
@@ -249,14 +302,14 @@ func (h *userHandlers) ValidateQueryAddress(c *gin.Context, pgn *pagination.Pagi
 	var isShopDefaultFilter bool
 
 	switch isDefault {
-	case "true":
+	case constant.AddressDefault:
 		isDefaultFilter = true
 	default:
 		isDefaultFilter = false
 	}
 
 	switch isShopDefault {
-	case "true":
+	case constant.AddressDefault:
 		isShopDefaultFilter = true
 	default:
 		isShopDefaultFilter = false
@@ -740,6 +793,70 @@ func (h *userHandlers) ChangePassword(c *gin.Context) {
 	response.SuccessResponse(c.Writer, nil, http.StatusOK)
 }
 
+func (h *userHandlers) CreateSLPPayment(c *gin.Context) {
+	var requestBody body.CreateSLPPaymentRequest
+	if err := c.ShouldBind(&requestBody); err != nil {
+		response.ErrorResponse(c.Writer, response.BadRequestMessage, http.StatusBadRequest)
+		return
+	}
+
+	invalidFields, err := requestBody.Validate()
+	if err != nil {
+		response.ErrorResponseData(c.Writer, invalidFields, response.UnprocessableEntityMessage, http.StatusUnprocessableEntity)
+		return
+	}
+
+	url, err := h.userUC.CreateSLPPayment(c, requestBody.TransactionID)
+	if err != nil {
+		var e *httperror.Error
+		if !errors.As(err, &e) {
+			h.logger.Errorf("HandlerUser, Error: %s", err)
+			response.ErrorResponse(c.Writer, response.InternalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+
+		response.ErrorResponse(c.Writer, e.Err.Error(), e.Status)
+		return
+	}
+
+	response.SuccessResponse(c.Writer, body.CreateSLPPaymentResponse{RedirectURL: url}, http.StatusOK)
+}
+
+func (h *userHandlers) SLPPaymentCallback(c *gin.Context) {
+	var requestBody body.SLPCallbackRequest
+	if err := c.ShouldBindJSON(&requestBody); err != nil {
+		response.ErrorResponse(c.Writer, response.BadRequestMessage, http.StatusBadRequest)
+		return
+	}
+
+	invalidFields, err := requestBody.Validate(h.cfg)
+	if err != nil {
+		response.ErrorResponseData(c.Writer, invalidFields, response.UnprocessableEntityMessage, http.StatusUnprocessableEntity)
+		return
+	}
+
+	id := c.Param("id")
+	transactionID, err := uuid.Parse(id)
+	if err != nil {
+		response.ErrorResponse(c.Writer, response.BadRequestMessage, http.StatusBadRequest)
+		return
+	}
+
+	if err := h.userUC.UpdateTransaction(c, transactionID.String(), requestBody); err != nil {
+		var e *httperror.Error
+		if !errors.As(err, &e) {
+			h.logger.Errorf("HandlerUser, Error: %s", err)
+			response.ErrorResponse(c.Writer, response.InternalServerErrorMessage, http.StatusInternalServerError)
+			return
+		}
+
+		response.ErrorResponse(c.Writer, e.Err.Error(), e.Status)
+		return
+	}
+
+	response.SuccessResponse(c.Writer, nil, http.StatusOK)
+}
+
 func (h *userHandlers) CreateTransaction(c *gin.Context) {
 	var requestBody body.CreateTransactionRequest
 	if err := c.ShouldBind(&requestBody); err != nil {
@@ -759,7 +876,8 @@ func (h *userHandlers) CreateTransaction(c *gin.Context) {
 		return
 	}
 
-	if err = h.userUC.CreateTransaction(c, userID.(string), requestBody); err != nil {
+	transactionID, err := h.userUC.CreateTransaction(c, userID.(string), requestBody)
+	if err != nil {
 		var e *httperror.Error
 		if !errors.As(err, &e) {
 			h.logger.Errorf("HandlerUser, Error: %s", err)
@@ -771,5 +889,5 @@ func (h *userHandlers) CreateTransaction(c *gin.Context) {
 		return
 	}
 
-	response.SuccessResponse(c.Writer, nil, http.StatusOK)
+	response.SuccessResponse(c.Writer, body.CreateTransactionResponse{TransactionID: transactionID}, http.StatusOK)
 }
